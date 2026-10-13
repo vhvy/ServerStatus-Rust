@@ -1,0 +1,84 @@
+name: Release Linux x86_64 Client
+
+on:
+  push:
+    branches:
+      - deploy
+  workflow_dispatch:
+
+concurrency:
+  group: client-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-client:
+    if: github.ref == 'refs/heads/deploy'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Generate release metadata
+        id: meta
+        shell: bash
+        run: |
+          build_date=$(TZ=Asia/Shanghai date +%Y%m%d)
+          short_sha=${GITHUB_SHA:0:7}
+          tag="client-${build_date}-${short_sha}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "build_date=${build_date}" >> "$GITHUB_OUTPUT"
+          echo "archive=stat_client-x86_64-unknown-linux-musl-${build_date}-${short_sha}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Build Linux x86_64 client
+        shell: bash
+        run: |
+          docker build --platform linux/amd64 --output type=local,dest=dist --file - . <<'DOCKERFILE'
+          FROM rust:1.94-alpine3.23 AS builder
+          WORKDIR /app
+          COPY . .
+          RUN apk add --no-cache musl-dev linux-headers git cmake make g++
+          RUN cargo build --release --locked --bin stat_client
+          RUN strip target/release/stat_client
+          RUN target/release/stat_client --version
+
+          FROM scratch AS artifact
+          COPY --from=builder /app/target/release/stat_client /stat_client
+          DOCKERFILE
+
+      - name: Package client and checksum
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.meta.outputs.archive }}
+        run: |
+          tar -czf "dist/${ARCHIVE}" -C dist stat_client
+          cd dist
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Linux x86_64 Client ${{ steps.meta.outputs.tag }}
+          body: |
+            Linux x86_64 client built from the deploy branch.
+
+            Build date (Asia/Shanghai): ${{ steps.meta.outputs.build_date }}
+            Commit: ${{ github.sha }}
+            Target: x86_64-unknown-linux-musl
+
+            Extract the archive and run `./stat_client --help`.
+            Verify the download with `sha256sum -c <archive>.sha256`.
+          files: |
+            dist/${{ steps.meta.outputs.archive }}
+            dist/${{ steps.meta.outputs.archive }}.sha256
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
+          make_latest: true
